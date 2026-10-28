@@ -1,0 +1,6 @@
+{
+  "allowed_users_raw": "Administrator, DefaultAccount, Guest, user, WDAGUtilityAccount",
+  "first_run_done": true,
+  "auto_fire_ban": true,
+  "strict_net_wall": false
+}

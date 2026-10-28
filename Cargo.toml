@@ -1,0 +1,30 @@
+[package]
+name = "server_guardian"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 时间日期处理库
+chrono = "0.4"
+# 桌面 GUI 框架 (egui)
+eframe = { version = "0.26", default-features = false, features = ["default_fonts", "glow"] }
+# 异步运行时，用于后台扫描、Web 服务器
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time", "process", "sync", "net"] }
+# 序列化/反序列化 JSON (用于配置文件和 Web API)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# 随机数生成 (用于给威胁生成唯一 ID)
+rand = "0.8"
+# SQLite 数据库，捆绑模式（不需要外部安装 SQLite）
+rusqlite = { version = "0.31", features = ["bundled"] }
+# egui 扩展库 (用于日历和表格)
+egui_extras = { version = "0.26", features = ["datepicker"] }
+# Web 服务器框架
+axum = "0.7"
+
+[profile.release]
+opt-level = "z"      # 优化体积
+lto = true           # 链接时优化
+strip = true         # 移除调试符号
+codegen-units = 1    # 提升运行速度
+panic = "abort"      # 发生崩溃时直接退出，不打印多余信息

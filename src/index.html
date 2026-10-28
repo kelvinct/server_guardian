@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Server Guardian Web Monitor</title>
+    <style>
+        :root {
+            --bg: #1e1e1e;
+            --panel: #252526;
+            --border: #3f3f46;
+            --text: #dddddd;
+            --green: #44dd44;
+            --red: #ff6b6b;
+            --yellow: #ffb400;
+            --btn: #3f3f46;
+        }
+        body {
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+            margin: 0; padding: 20px;
+        }
+        h1 { font-size: 24px; margin-bottom: 10px; }
+        h2 { font-size: 18px; margin-top: 0; border-bottom: 1px solid var(--border); padding-bottom: 10px; display: flex; justify-content: space-between; align-items: center;}
+        
+        .controls {
+            background: var(--panel);
+            padding: 15px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            border: 1px solid var(--border);
+        }
+        input[type="text"], input[type="date"] {
+            background: #1e1e1e;
+            color: var(--text);
+            border: 1px solid var(--border);
+            padding: 6px 10px;
+            border-radius: 4px;
+            outline: none;
+        }
+        button {
+            background: var(--btn);
+            color: var(--text);
+            border: 1px solid var(--border);
+            padding: 6px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover { background: #555; }
+        
+        .container { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        @media (max-width: 900px) { .container { grid-template-columns: 1fr; } }
+        
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 15px;
+            height: 600px;
+            display: flex;
+            flex-direction: column;
+        }
+        .table-container { overflow-y: auto; flex: 1; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th { text-align: left; padding: 8px; border-bottom: 2px solid var(--border); position: sticky; top: 0; background: var(--panel); z-index: 10;}
+        td { padding: 8px; border-bottom: 1px solid var(--border); word-break: break-all; }
+        tr:hover { background-color: #2d2d30; }
+        .red { color: var(--red); }
+        .green { color: var(--green); }
+        .gray { color: #888; text-align: center; padding: 20px;}
+    </style>
+</head>
+<body>
+    <h1>🛡️ Server Guardian Web Monitor</h1>
+    
+    <!-- 全局控制器 -->
+    <div class="controls">
+        <div>
+            <label>🔍 關鍵字搜尋: </label>
+            <input type="text" id="searchInput" placeholder="輸入 IP 或事件內容...">
+        </div>
+        <div>
+            <label>📅 查詢模式: </label>
+            <button id="btnLatest" onclick="setMode('latest')">顯示即時最新</button>
+            <button id="btnHistory" onclick="setMode('history')">查詢歷史紀錄</button>
+        </div>
+        <div id="historyControls" style="display: none;">
+            <label>選擇日期: </label>
+            <input type="date" id="dateInput">
+        </div>
+        <div id="status" class="green">已連線</div>
+    </div>
+    
+    <div class="container">
+        <!-- 日志面板 -->
+        <div class="panel">
+            <h2>📝 系統日誌 <span id="logsTitle" style="font-size:14px; color:#aaa;">(即時最新)</span></h2>
+            <div class="table-container">
+                <table id="logsTable">
+                    <thead><tr><th width="150">時間</th><th>事件內容</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- 封禁面板 -->
+        <div class="panel">
+            <h2>🔥 封禁 IP 紀錄 <span id="bansTitle" style="font-size:14px; color:#aaa;">(即時最新)</span></h2>
+            <div class="table-container">
+                <table id="bansTable">
+                    <thead><tr><th width="120">IP 位址</th><th>封禁時間</th><th>原因</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentMode = 'latest'; // 'latest' 或 'history'
+        let refreshInterval = null;
+
+        // 设置日期默认值为今天
+        document.getElementById('dateInput').value = new Date().toISOString().split('T')[0];
+
+        function setMode(mode) {
+            currentMode = mode;
+            const historyCtrl = document.getElementById('historyControls');
+            const logsTitle = document.getElementById('logsTitle');
+            const bansTitle = document.getElementById('bansTitle');
+
+            if (mode === 'history') {
+                historyCtrl.style.display = 'block';
+                logsTitle.innerText = '(歷史查詢)';
+                bansTitle.innerText = '(歷史查詢)';
+                clearInterval(refreshInterval); // 历史模式停止自动刷新
+            } else {
+                historyCtrl.style.display = 'none';
+                logsTitle.innerText = '(即時最新)';
+                bansTitle.innerText = '(即時最新)';
+                startAutoRefresh(); // 恢复自动刷新
+            }
+            fetchData();
+        }
+
+        async function fetchData() {
+            try {
+                const keyword = document.getElementById('searchInput').value.trim();
+                let url = '';
+
+                if (currentMode === 'history') {
+                    const date = document.getElementById('dateInput').value;
+                    if(!date) return alert("请选择日期！");
+                    url = `?date=${date}&keyword=${encodeURIComponent(keyword)}`;
+                } else {
+                    url = `?keyword=${encodeURIComponent(keyword)}`;
+                }
+
+                // 拉取日志
+                const logsRes = await fetch('/api/logs' + url);
+                const logs = await logsRes.json();
+                const logsTbody = document.querySelector('#logsTable tbody');
+                if (logs.length === 0) {
+                    logsTbody.innerHTML = '<tr><td colspan="2" class="gray">無資料</td></tr>';
+                } else {
+                    logsTbody.innerHTML = logs.map(l => {
+                        let cls = '';
+                        if (l.message.includes('⚠️') || l.message.includes('❌') || l.message.includes('🔥')) cls = 'red';
+                        else if (l.message.includes('✅') || l.message.includes('🟢') || l.message.includes('⚙️')) cls = 'green';
+                        return `<tr><td>${l.timestamp}</td><td class="${cls}">${l.message}</td></tr>`;
+                    }).join('');
+                }
+
+                // 拉取封禁记录
+                const bansRes = await fetch('/api/bans' + url);
+                const bans = await bansRes.json();
+                const bansTbody = document.querySelector('#bansTable tbody');
+                if (bans.length === 0) {
+                    bansTbody.innerHTML = '<tr><td colspan="3" class="gray">無資料</td></tr>';
+                } else {
+                    bansTbody.innerHTML = bans.map(b => 
+                        `<tr><td class="red">${b.ip}</td><td>${b.banned_at}</td><td>${b.reason}</td></tr>`
+                    ).join('');
+                }
+
+                document.getElementById('status').innerText = '已連線';
+                document.getElementById('status').className = 'green';
+            } catch (err) {
+                document.getElementById('status').innerText = '連線失敗';
+                document.getElementById('status').className = 'red';
+            }
+        }
+
+        function startAutoRefresh() {
+            if (refreshInterval) clearInterval(refreshInterval);
+            refreshInterval = setInterval(fetchData, 5000); // 5秒刷新
+        }
+
+        // 监听搜索框变化 (防抖)
+        let searchTimeout = null;
+        document.getElementById('searchInput').addEventListener('input', () => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(fetchData, 500);
+        });
+        
+        // 监听日期变化
+        document.getElementById('dateInput').addEventListener('change', fetchData);
+
+        // 初始加载
+        fetchData();
+        startAutoRefresh();
+    </script>
+</body>
+</html>
