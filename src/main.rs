@@ -1,17 +1,17 @@
 // =========================================================================
-// 20261029: 项目完整版 - 包含桌面端、SQLite 历史记录、Web 服务端
-// 20261029: 优化 Web 端口分配 (优先 8080，被占用则自动随机分配)
-// 20261029: 全面防御 Panic 崩溃，加入安全错误处理
-// 20261029: 加入 30 天冷热数据自动归档 (打包至 db/backups/)
-// 20261029: 增加历史记录沙箱查看模式 (只读旧库，不影响当前系统)
-// 20261029: 修复 egui 0.26 的 ComboBox API 兼容性及 conn 生命周期编译错误
+// 20261029: 項目完整版 - 包含桌面端、SQLite 歷史記錄、Web 服務端
+// 20261029: 優化 Web 端口分配 (優先 8080，被佔用則自動隨機分配)
+// 20261029: 全面防禦 Panic 崩潰，加入安全錯誤處理
+// 20261029: 加入 30 天冷熱數據自動歸檔 (打包至 db/backups/)
+// 20261029: 增加歷史記錄沙箱查看模式 (只讀舊庫，不影響當前系統)
+// 20261029: 新增「防匿名登入探測 (4624)」自動封禁功能
+// 20261029: 修復切換標籤時歷史紀錄不會自動刷新（顯示空）的 Bug
+// 20261029: 【優化】修復 4625 與 4624 共用鎖的時間誤差、精準判斷內網 IP
+// 20261029: 【最終修復】廢棄容易排版崩潰的 TableBuilder，改用原生 Grid 繪製表格，保證顯示
 // =========================================================================
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-// ==========================================
-// 引入外部库 (Crates)
-// ==========================================
 use axum::{
     extract::{Query, State},
     response::{Html, IntoResponse},
@@ -20,7 +20,7 @@ use axum::{
 };
 use chrono::{Local, NaiveDate};
 use eframe::egui;
-use egui_extras::{DatePickerButton, TableBuilder};
+use egui_extras::DatePickerButton;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -35,26 +35,28 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
 
-// ==========================================
-// 常量定义
-// ==========================================
-const CREATE_NO_WINDOW: u32 = 0x08000000; // Windows API 隐藏黑框
-const CONFIG_FILE: &str = "server_guardian_config.json"; // 配置文件路径
-const DB_FILE: &str = "db/server_guardian.db"; // 数据库主文件路径
-const BACKUP_DIR: &str = "db/backups"; // 历史归档文件夹
-const MAX_LOG_LINES: usize = 500; // 内存中 UI 最大日志行数
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+const CONFIG_FILE: &str = "server_guardian_config.json";
+const DB_FILE: &str = "db/server_guardian.db";
+const BACKUP_DIR: &str = "db/backups";
+const MAX_LOG_LINES: usize = 500;
 
-// 定义桌面端的三个标签页
 #[derive(Clone, Copy, PartialEq)]
 enum ActiveTab {
-    Live,     // 实时监控
-    History,  // 历史记录
-    Settings, // 核心设置
+    Live,
+    History,
+    Settings,
 }
 
-// ==========================================
-// 黑匣子日志功能
-// ==========================================
+// 精準判斷是否為內網 IP
+fn is_private_ip(ip: &str) -> bool {
+    if let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() {
+        addr.is_private()
+    } else {
+        false
+    }
+}
+
 fn log_to_file(msg: &str) {
     let mut path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("."));
     path.pop();
@@ -64,9 +66,9 @@ fn log_to_file(msg: &str) {
     }
 }
 
-// ==========================================
-// SQLite 数据库模块
-// ==========================================
+// ─────────────────────────────────────────────────────────
+// SQLite 數據庫模塊
+// ─────────────────────────────────────────────────────────
 struct Database {
     conn: StdMutex<Connection>,
 }
@@ -130,7 +132,6 @@ impl Database {
         }
     }
 
-    // 自动归档旧数据 (冷热分离)
     fn clean_old_data(&self) {
         if let Ok(conn) = self.conn.lock() {
             let thirty_days_ago = (Local::now() - chrono::Duration::days(30)).format("%Y-%m-%d %H:%M:%S").to_string();
@@ -173,27 +174,61 @@ impl Database {
     }
 
     fn get_logs_by_date(&self, date: &str, keyword: &str) -> Vec<(String, String)> {
-        let conn = match self.conn.lock() { Ok(c) => c, Err(_) => return Vec::new() };
-        let mut stmt = match conn.prepare("SELECT timestamp, message FROM logs WHERE timestamp LIKE ?1 AND message LIKE ?2 ORDER BY id DESC LIMIT 500") {
-            Ok(s) => s, Err(_) => return Vec::new(),
+        let conn = match self.conn.lock() { 
+            Ok(c) => c, 
+            Err(e) => {
+                log_to_file(&format!("❌ 取得資料庫鎖失敗: {}", e));
+                return Vec::new() 
+            } 
         };
+        
+        let mut stmt = match conn.prepare("SELECT timestamp, message FROM logs WHERE timestamp LIKE ?1 AND message LIKE ?2 ORDER BY id DESC LIMIT 500") {
+            Ok(s) => s, 
+            Err(e) => {
+                log_to_file(&format!("❌ 準備 SQL 語句失敗: {}", e));
+                return Vec::new() 
+            },
+        };
+        
         let date_like = format!("{}%", date);
         let key_like = format!("%{}%", keyword);
+        
         let rows = match stmt.query_map(params![date_like, key_like], |row| Ok((row.get(0)?, row.get(1)?))) {
-            Ok(r) => r, Err(_) => return Vec::new(),
+            Ok(r) => r, 
+            Err(e) => {
+                log_to_file(&format!("❌ 查詢資料失敗: {}", e));
+                return Vec::new() 
+            },
         };
         rows.filter_map(Result::ok).collect()
     }
 
     fn get_bans_by_date(&self, date: &str, keyword: &str) -> Vec<(String, String, String, String)> {
-        let conn = match self.conn.lock() { Ok(c) => c, Err(_) => return Vec::new() };
-        let mut stmt = match conn.prepare("SELECT ip, rule_name, banned_at, reason FROM banned_ips WHERE banned_at LIKE ?1 AND ip LIKE ?2 ORDER BY id DESC") {
-            Ok(s) => s, Err(_) => return Vec::new(),
+        let conn = match self.conn.lock() { 
+            Ok(c) => c, 
+            Err(e) => {
+                log_to_file(&format!("❌ 取得資料庫鎖失敗: {}", e));
+                return Vec::new() 
+            } 
         };
+        
+        let mut stmt = match conn.prepare("SELECT ip, rule_name, banned_at, reason FROM banned_ips WHERE banned_at LIKE ?1 AND ip LIKE ?2 ORDER BY id DESC") {
+            Ok(s) => s, 
+            Err(e) => {
+                log_to_file(&format!("❌ 準備 SQL 語句失敗: {}", e));
+                return Vec::new() 
+            },
+        };
+        
         let date_like = format!("{}%", date);
         let key_like = format!("%{}%", keyword);
+        
         let rows = match stmt.query_map(params![date_like, key_like], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))) {
-            Ok(r) => r, Err(_) => return Vec::new(),
+            Ok(r) => r, 
+            Err(e) => {
+                log_to_file(&format!("❌ 查詢封禁紀錄失敗: {}", e));
+                return Vec::new() 
+            },
         };
         rows.filter_map(Result::ok).collect()
     }
@@ -221,9 +256,9 @@ impl Database {
     }
 }
 
-// ==========================================
-// Web 服务器模块
-// ==========================================
+// ─────────────────────────────────────────────────────────
+// Web 服務器模塊
+// ─────────────────────────────────────────────────────────
 #[derive(Deserialize)]
 struct WebQuery {
     date: Option<String>,
@@ -293,9 +328,9 @@ async fn web_api_bans(State(db): State<Arc<Database>>, Query(params): Query<WebQ
     Json(db.get_latest_bans())
 }
 
-// ==========================================
-// PowerShell 定位与执行
-// ==========================================
+// ─────────────────────────────────────────────────────────
+// PowerShell 定位與執行
+// ─────────────────────────────────────────────────────────
 fn powershell_exe() -> PathBuf {
     let sysnative = Path::new(r"C:\Windows\Sysnative\WindowsPowerShell\v1.0\powershell.exe");
     if sysnative.exists() { return sysnative.to_path_buf(); }
@@ -349,9 +384,9 @@ fn detect_os_caption() -> String {
     "Windows (未知版本)".to_string()
 }
 
-// ==========================================
-// 数据模型
-// ==========================================
+// ─────────────────────────────────────────────────────────
+// 數據模型
+// ─────────────────────────────────────────────────────────
 #[derive(Clone, PartialEq, Debug)]
 enum ThreatType { UnknownAccount(String), SuspiciousShell(String) }
 
@@ -385,7 +420,7 @@ struct GuardianApp {
     pending_threats: Arc<Mutex<Vec<PendingThreat>>>,
     last_scan_at: Arc<RwLock<Option<Instant>>>,
     last_4625_check: Arc<RwLock<Option<Instant>>>,
-    config_dirty: bool,
+    last_4624_check: Arc<RwLock<Option<Instant>>>,
     elevated: bool,
     
     history_date: NaiveDate,
@@ -414,9 +449,6 @@ async fn add_log(logs: &Arc<Mutex<Vec<String>>>, db: &Arc<Database>, message: &s
     db.insert_log(&full_time, message);
 }
 
-// ==========================================
-// 扫描与拦截逻辑
-// ==========================================
 const SCRIPT_LIST_USERS: &str = r#"
 $ErrorActionPreference = 'SilentlyContinue'
 $users = @()
@@ -517,7 +549,7 @@ try {{
     for line in stdout.lines() {
         let ip = line.trim();
         if ip.is_empty() || ip == "-" || ip == "::1" || ip == "127.0.0.1" { continue; }
-        if ip.starts_with("192.168.") || ip.starts_with("10.") || ip.starts_with("172.16.") { continue; }
+        if is_private_ip(ip) { continue; }
         if !ip.contains('.') { continue; }
         bad_ips.push(ip.to_string());
     }
@@ -543,6 +575,52 @@ try {{
                 add_log(logs, db, &format!("❌ [主動防禦] 封鎖失敗！請確認是否為管理員權限。")).await;
             }
         }
+    }
+}
+
+async fn check_and_ban_anonymous_logon(logs: &Arc<Mutex<Vec<String>>>, db: &Arc<Database>, last_check: &Arc<RwLock<Option<Instant>>>) {
+    let window_secs = { let g = last_check.read().await; g.map(|t| t.elapsed().as_secs().max(60)).unwrap_or(300) };
+    let script = format!(r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$since = (Get-Date).AddSeconds(-{w})
+try {{
+    Get-WinEvent -FilterHashtable @{{LogName='Security'; Id=4624; StartTime=$since}} -MaxEvents 500 -ErrorAction Ignore |
+    ForEach-Object {{
+        try {{
+            $x = [xml]$_.ToXml()
+            $logonType = ($x.Event.EventData.Data | Where-Object {{ $_.Name -eq 'LogonType' }}).'#text'
+            $targetUser = ($x.Event.EventData.Data | Where-Object {{ $_.Name -eq 'TargetUserName' }}).'#text'
+            $ipAddress = ($x.Event.EventData.Data | Where-Object {{ $_.Name -eq 'IpAddress' }}).'#text'
+            
+            if ($logonType -eq '3' -and $targetUser -eq 'ANONYMOUS LOGON' -and $ipAddress -match '^\d+\.\d+\.\d+\.\d+$') {{
+                $ipAddress
+            }}
+        }} catch {{ }}
+    }}
+}} catch {{ }}
+"#, w = window_secs);
+
+    let output = match ps_run(&script).await { Some(o) => o, None => return };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    
+    let mut bad_ips: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        let ip = line.trim();
+        if !ip.is_empty() && ip != "-" && ip != "127.0.0.1" { 
+            if !is_private_ip(ip) { bad_ips.push(ip.to_string()); }
+        }
+    }
+
+    for unique_ip in bad_ips.iter() {
+        let rule_name = format!("BAN_ANON_{}", unique_ip.replace('.', "_"));
+        let check = ps_run(&format!("if (Get-NetFirewallRule -Name '{}' -ErrorAction SilentlyContinue) {{ 'EXISTS' }} else {{ 'MISSING' }}", rule_name)).await;
+        let exists = check.map(|o| String::from_utf8_lossy(&o.stdout).contains("EXISTS")).unwrap_or(false);
+        if exists { continue; }
+
+        add_log(logs, db, &format!("🚫 [主動防禦] 偵測到匿名登入探測 IP {}！直接封鎖。", unique_ip)).await;
+        let target_range = format!("{}.0/24", unique_ip.split('.').take(3).collect::<Vec<&str>>().join("."));
+        let _ = ps_run(&format!("New-NetFirewallRule -Name '{}' -DisplayName '{}' -Direction Inbound -RemoteAddress '{}' -Action Block", rule_name, rule_name, target_range)).await;
+        db.insert_banned_ip(unique_ip, &rule_name, "匿名登入探測 (4624)");
     }
 }
 
@@ -697,8 +775,10 @@ impl GuardianApp {
             is_monitoring: false, active_tab: ActiveTab::Live, autostart_enabled: initial_autostart,
             shutdown_trigger: Arc::new(AtomicBool::new(false)), monitor_handle: None,
             logs, pending_threats: Arc::new(Mutex::new(Vec::new())),
-            last_scan_at: Arc::new(RwLock::new(None)), last_4625_check: Arc::new(RwLock::new(None)),
-            config_dirty: false, elevated,
+            last_scan_at: Arc::new(RwLock::new(None)), 
+            last_4625_check: Arc::new(RwLock::new(None)), 
+            last_4624_check: Arc::new(RwLock::new(None)),
+            elevated,
             history_date: Local::now().date_naive(), history_search: String::new(),
             history_logs: Vec::new(), history_bans: Vec::new(),
             web_port,
@@ -713,10 +793,15 @@ impl eframe::App for GuardianApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                let old_tab = self.active_tab;
                 ui.selectable_value(&mut self.active_tab, ActiveTab::Live, "🟢 即時監控");
                 ui.selectable_value(&mut self.active_tab, ActiveTab::History, "📅 歷史紀錄");
                 ui.selectable_value(&mut self.active_tab, ActiveTab::Settings, "⚙️ 核心設定");
                 
+                if old_tab != ActiveTab::History && self.active_tab == ActiveTab::History {
+                    self.refresh_history();
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if !self.elevated {
                         ui.colored_label(egui::Color32::from_rgb(255, 180, 0), "⚠ 非管理員模式");
@@ -836,10 +921,14 @@ impl GuardianApp {
                         let allowed_live = Arc::clone(&self.allowed_users_live);
                         let last_scan = Arc::clone(&self.last_scan_at);
                         let last_4625 = Arc::clone(&self.last_4625_check);
+                        let last_4624 = Arc::clone(&self.last_4624_check);
                         self.monitor_handle = Some(tokio::spawn(async move {
                             while !shutdown_clone.load(Ordering::SeqCst) {
                                 scan_and_intercept_threats(&allowed_live, &logs_clone, &db_clone, &threats_clone, &last_scan).await;
-                                if ban_enabled { check_and_execute_auto_fire_ban(&logs_clone, &db_clone, &last_4625).await; }
+                                if ban_enabled { 
+                                    check_and_execute_auto_fire_ban(&logs_clone, &db_clone, &last_4625).await; 
+                                    check_and_ban_anonymous_logon(&logs_clone, &db_clone, &last_4624).await;
+                                }
                                 tokio::time::sleep(Duration::from_secs(5)).await;
                             }
                         }));
@@ -857,7 +946,7 @@ impl GuardianApp {
                 egui::ScrollArea::vertical().max_height(320.0).stick_to_bottom(true).show(ui, |ui| {
                     if let Ok(logs) = self.logs.try_lock() {
                         for log in logs.iter() {
-                            let color = if log.contains("🚨") || log.contains("❌") || log.contains("🔥") || log.contains("⚠️") || log.contains("⚠") { egui::Color32::LIGHT_RED }
+                            let color = if log.contains("🚨") || log.contains("❌") || log.contains("🔥") || log.contains("⚠️") || log.contains("⚠") || log.contains("🚫") { egui::Color32::LIGHT_RED }
                                 else if log.contains("✅") || log.contains("🟢") || log.contains("🛑") || log.contains("⚙️") { egui::Color32::GREEN }
                                 else { egui::Color32::LIGHT_GRAY };
                             ui.colored_label(color, log);
@@ -904,7 +993,6 @@ impl GuardianApp {
                 ui.label("📂 查看備份:");
                 let selected_text = self.selected_backup.clone().unwrap_or_else(|| "當前主庫 (Live)".to_string());
                 
-                // 🔧 修复 E0502: 克隆 backup_files 列表以打破借用冲突
                 let files_clone = self.backup_files.clone();
                 
                 egui::ComboBox::from_id_source("backup_combo")
@@ -934,59 +1022,53 @@ impl GuardianApp {
             let date_str = self.history_date.format("%Y-%m-%d").to_string();
             ui.heading(format!("📆 {} 的紀錄", if self.is_sandbox { "沙箱歸檔" } else { &date_str }));
             
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.label("🔥 封禁 IP 紀錄:");
-                if self.history_bans.is_empty() {
-                    ui.colored_label(egui::Color32::GRAY, "當日無封禁紀錄。");
-                } else {
-                    TableBuilder::new(ui)
-                        .striped(true)
-                        .column(egui_extras::Column::auto().at_least(120.0))
-                        .column(egui_extras::Column::auto().at_least(150.0))
-                        .column(egui_extras::Column::auto().at_least(150.0))
-                        .column(egui_extras::Column::remainder())
-                        .header(20.0, |mut header| {
-                            header.col(|ui| { ui.strong("IP 位址"); });
-                            header.col(|ui| { ui.strong("防火牆規則"); });
-                            header.col(|ui| { ui.strong("封禁時間"); });
-                            header.col(|ui| { ui.strong("原因"); });
-                        })
-                        .body(|mut body| {
-                            for ban in &self.history_bans {
-                                body.row(18.0, |mut row| {
-                                    row.col(|ui| { ui.colored_label(egui::Color32::LIGHT_RED, &ban.0); });
-                                    row.col(|ui| { ui.label(&ban.1); });
-                                    row.col(|ui| { ui.label(&ban.2); });
-                                    row.col(|ui| { ui.label(&ban.3); });
-                                });
-                            }
-                        });
-                }
+            ui.add_space(10.0);
 
-                ui.add_space(20.0);
+            // 1. 封禁 IP 紀錄 (改用極度穩定的 Grid 佈局)
+            ui.label("🔥 封禁 IP 紀錄:");
+            if self.history_bans.is_empty() {
+                ui.colored_label(egui::Color32::GRAY, "當日無封禁紀錄。");
+            } else {
+                egui::ScrollArea::vertical().id_source("bans_scroll").max_height(200.0).show(ui, |ui| {
+                    egui::Grid::new("bans_grid").striped(true).min_col_width(100.0).show(ui, |ui| {
+                        ui.strong("IP 位址");
+                        ui.strong("防火牆規則");
+                        ui.strong("封禁時間");
+                        ui.strong("原因");
+                        ui.end_row();
 
-                ui.label("📝 系統事件日誌:");
-                if self.history_logs.is_empty() {
-                    ui.colored_label(egui::Color32::GRAY, "當日無系統事件。");
-                } else {
-                    TableBuilder::new(ui)
-                        .striped(true)
-                        .column(egui_extras::Column::auto().at_least(150.0))
-                        .column(egui_extras::Column::remainder())
-                        .header(20.0, |mut header| {
-                            header.col(|ui| { ui.strong("時間"); });
-                            header.col(|ui| { ui.strong("事件內容"); });
-                        })
-                        .body(|mut body| {
-                            for log in &self.history_logs {
-                                body.row(18.0, |mut row| {
-                                    row.col(|ui| { ui.label(&log.0); });
-                                    row.col(|ui| { ui.label(&log.1); });
-                                });
-                            }
-                        });
-                }
-            });
+                        for ban in &self.history_bans {
+                            ui.colored_label(egui::Color32::LIGHT_RED, &ban.0);
+                            ui.label(&ban.1);
+                            ui.label(&ban.2);
+                            ui.label(&ban.3);
+                            ui.end_row();
+                        }
+                    });
+                });
+            }
+
+            ui.add_space(20.0);
+
+            // 2. 系統事件日誌 (改用極度穩定的 Grid 佈局)
+            ui.label("📝 系統事件日誌:");
+            if self.history_logs.is_empty() {
+                ui.colored_label(egui::Color32::GRAY, "當日無系統事件。");
+            } else {
+                egui::ScrollArea::vertical().id_source("logs_scroll").max_height(200.0).show(ui, |ui| {
+                    egui::Grid::new("logs_grid").striped(true).min_col_width(100.0).show(ui, |ui| {
+                        ui.strong("時間");
+                        ui.strong("事件內容");
+                        ui.end_row();
+
+                        for log in &self.history_logs {
+                            ui.label(&log.0);
+                            ui.label(&log.1);
+                            ui.end_row();
+                        }
+                    });
+                });
+            }
         });
     }
 
@@ -1010,7 +1092,6 @@ impl GuardianApp {
         self.history_logs.clear();
         self.history_bans.clear();
 
-        // 🔧 修复 E0597: 分离 rows_result，提前让临时变量销毁，彻底解决生命周期冲突
         {
             let mut stmt_logs = match conn.prepare("SELECT timestamp, message FROM logs ORDER BY id DESC LIMIT 1000") {
                 Ok(s) => s,

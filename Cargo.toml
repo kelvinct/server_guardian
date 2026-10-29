@@ -4,27 +4,38 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# 时间日期处理库
+# 時間與日期處理庫 (用於日誌時間戳記、歷史查詢與 30 天資料歸檔)
 chrono = "0.4"
+
 # 桌面 GUI 框架 (egui)
+# 使用 glow 作為渲染後端，對於沒有獨顯的舊 Server 或遠端桌面 (RDP) 環境相容性最好
 eframe = { version = "0.26", default-features = false, features = ["default_fonts", "glow"] }
-# 异步运行时，用于后台扫描、Web 服务器
+
+# 異步運行時 (用於後台每 5 秒的掃描循環、Web 伺服器、以及調用 PowerShell)
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time", "process", "sync", "net"] }
-# 序列化/反序列化 JSON (用于配置文件和 Web API)
+
+# 序列化/反序列化 JSON (用於讀寫配置檔，以及 Web API 的資料傳輸)
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# 随机数生成 (用于给威胁生成唯一 ID)
+
+# 隨機數生成 (用於為隔離區的每一個威脅生成唯一的 ID，防止 UI 衝突)
 rand = "0.8"
-# SQLite 数据库，捆绑模式（不需要外部安装 SQLite）
+
+# SQLite 資料庫
+# 開啟 bundled 特性：會將 SQLite 的 C 原始碼直接編譯進 exe 中，不需在 Server 上額外安裝
 rusqlite = { version = "0.31", features = ["bundled"] }
-# egui 扩展库 (用于日历和表格)
+
+# egui 擴展庫 (用於歷史紀錄頁面的日曆選擇器 DatePicker，以及資料表格 TableBuilder)
 egui_extras = { version = "0.26", features = ["datepicker"] }
-# Web 服务器框架
+
+# Web 伺服器框架 (用於提供瀏覽器存取即時日誌與封禁記錄的 API)
 axum = "0.7"
 
+
 [profile.release]
-opt-level = "z"      # 优化体积
-lto = true           # 链接时优化
-strip = true         # 移除调试符号
-codegen-units = 1    # 提升运行速度
-panic = "abort"      # 发生崩溃时直接退出，不打印多余信息
+opt-level = "z"      # 優化體積 (將生成的 exe 檔案大小降到最低)
+lto = true           # 連結時優化 (Link Time Optimization)，跨模組優化效能並減小體積
+strip = true         # 移除除錯符號 (進一步減小 exe 體積)
+codegen-units = 1    # 提升運行速度 (將程式碼生成單元設為 1，犧牲編譯時間換取執行效能)
+panic = "abort"      # 發生致命崩潰時直接退出，不進行堆疊展開 (減少體積)
+                     # 注意：我們在 main.rs 中使用了 std::panic::set_hook 寫入黑匣子日誌，因此即使 panic 也能成功記錄錯誤。
